@@ -1,0 +1,1 @@
+SockJS for Ejabberd

@@ -1,0 +1,11 @@
+{application, ejabberd_sockjs,
+ [
+  {description, "sockjs c2s connection for ejabberd"},
+  {vsn, "0.0.1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {env, []}
+ ]}.
