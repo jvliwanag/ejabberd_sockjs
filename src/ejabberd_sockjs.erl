@@ -42,7 +42,7 @@
 -export([
 	start/1,
 	start_link/1,
-	start_supervised/2,
+	start_supervised/1,
 	receive_bin/2
 ]).
 
@@ -60,6 +60,12 @@
 
 	%% TODO
 	change_shaper/2
+]).
+
+%% ejabberd_listener callbacks
+-export([
+	socket_type/0,
+	start_listener/2
 ]).
 
 %% gen_server callbacks
@@ -80,6 +86,11 @@
 	c2s_pid :: pid() | undefined
 }).
 
+
+-record(sockjs_state, {
+	conn_pid :: pid() | undefined
+}).
+
 %% API
 
 -spec start(sockjs_conn()) -> {ok, pid()}.
@@ -91,11 +102,10 @@ start_link(Conn) ->
 	gen_server:start_link(?MODULE, [Conn], []).
 
 
--spec start_supervised(host(), sockjs_conn()) -> {ok, pid()} | {error, not_started}.
-start_supervised(Host, Conn) ->
+-spec start_supervised(sockjs_conn()) -> {ok, pid()} | {error, not_started}.
+start_supervised(Conn) ->
 	?DEBUG("Starting sockjs session", []),
-	SupProc = gen_mod:get_module_proc(Host, ?PROCNAME_MSJ),
-	case catch supervisor:start_child(SupProc, [Conn]) of
+	case catch supervisor:start_child(ejabberd_sockjs_sup, [Conn]) of
 		{ok, Pid} ->
 			{ok, Pid};
 		_Err ->
@@ -156,6 +166,31 @@ send({sockjs, SrvRef, _Conn}, Out) ->
 -spec reset_stream(sock()) -> ok.
 reset_stream({sockjs, SrvRef, _Conn}) ->
 	gen_server:cast(SrvRef, reset_stream).
+
+%% ejabberd_listener callbacks
+-spec socket_type() -> independent.
+socket_type() ->
+	independent.
+
+-type listener_opt() :: ok.
+-type ip_port_tcp() :: {inet:port_number(), inet:ip4_address(), tcp}.
+-spec start_listener(ip_port_tcp(), [listener_opt()]) -> {ok, pid()}.
+start_listener({Port, Ip, _}, Opts) ->
+	start_app(cowboy),
+	start_app(sockjs),
+
+	Path = proplists:get_value(path, Opts, "/sockjs"),
+	Prefix = proplists:get_value(prefix, Opts, Path),
+	PrefixBin = list_to_binary(Prefix),
+
+	PathPattern = [list_to_binary(X) || X <- string:tokens(Path, "/")] ++ ['...'],
+
+	SockjsState = sockjs_handler:init_state(PrefixBin, fun service_ej/3, #sockjs_state{}, []),
+	Routes = [{'_', [{PathPattern, sockjs_cowboy_handler, SockjsState}]}],
+
+	cowboy:start_listener({ejabberd_sockjs_http, Port}, 100,
+		cowboy_tcp_transport, [{port, Port}, {ip, Ip}],
+		cowboy_http_protocol, [{dispatch, Routes}]).
 
 %% gen_server callbacks
 init([Conn]) ->
@@ -227,6 +262,24 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+%% Internal
+
+service_ej(Conn, init, State) ->
+	{ok, Pid} = ejabberd_sockjs:start_supervised(Conn),
+
+	{ok, State#sockjs_state{conn_pid = Pid}};
+service_ej(_Conn, {recv, Data}, State) ->
+	Pid = State#sockjs_state.conn_pid,
+	ejabberd_sockjs:receive_bin(Pid, Data),
+	{ok, State};
+service_ej(_Conn, closed, State) ->
+	{ok, State}.
+
+start_app(App) ->
+	case application:start(App) of
+		ok -> ok;
+		{error, {already_started, _}} -> ok
+	end.
 
 %% EUnit Tests
 -ifdef(TEST).
@@ -345,6 +398,26 @@ reset_test() ->
 
 	?assert(received_start("a")),
 	?assert(received_start("b")).
+
+%% ejabberd_listener tests
+start_listener_test() ->
+	start_listener({{127, 0, 0, 1}, 9433, tcp}, []),
+	Apps = application:loaded_applications(),
+
+	?assert(is_application_started(cowboy)),
+	?assert(is_application_started(sockjs)),
+
+	%% TODO test actual start - meck?
+
+	ok.
+
+is_application_started(App) ->
+	lists:any(fun({A, _, _}) -> A =:= App end,
+		application:which_applications()).
+
+socket_type_test() ->
+	?assertEqual(independent, socket_type()).
+
 %% Utils
 
 load_xml_stream() ->
