@@ -43,7 +43,8 @@
 	start/1,
 	start_link/1,
 	start_supervised/1,
-	receive_bin/2
+	receive_bin/2,
+	stop/1
 ]).
 
 %% ejabberd_socket callbacks
@@ -116,6 +117,10 @@ start_supervised(Conn) ->
 -spec receive_bin(pid(), binary()) -> ok.
 receive_bin(SrvRef, Bin) ->
 	gen_server:cast(SrvRef, {receive_bin, Bin}).
+
+-spec stop(pid()) -> ok.
+stop(SrvRef) ->
+    gen_server:cast(SrvRef, close_session).
 
 %% ejabberd_socket callbacks
 
@@ -251,7 +256,17 @@ handle_cast(reset_stream, St) ->
 
 	NXMLStreamSt = xml_stream:new(C2SPid),
 	NSt = St#state{xml_stream_state = NXMLStreamSt},
-	{noreply, NSt}.
+	{noreply, NSt};
+
+handle_cast(close_session, St) ->
+	case St#state.c2s_pid of
+        P when is_pid(P) ->
+            ejabberd_c2s:stop(P);
+        _ ->
+            ok
+    end,
+    xml_stream:close(St#state.xml_stream_state),
+    {stop, normal, St}.
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -273,6 +288,8 @@ service_ej(_Conn, {recv, Data}, State) ->
 	ejabberd_sockjs:receive_bin(Pid, Data),
 	{ok, State};
 service_ej(_Conn, closed, State) ->
+    Pid = State#sockjs_state.conn_pid,
+    gen_server:cast(Pid, close_session),
 	{ok, State}.
 
 start_app(App) ->
